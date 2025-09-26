@@ -98,9 +98,9 @@ func main() {
 		Password: guestPass,
 	}
 	if err := authMgr.ValidateCredentials(ctx, auth); err != nil {
-		log.Fatalf("❌ Ошибка аутентификации: %v", err)
+		log.Fatalf("❌ authentication is failed: %v", err)
 	}
-	log.Printf("✅ Аутентификация успешна: %s@%s", guestUser, vmName)
+	log.Printf("✅ successful authentication: %s@%s", guestUser, vmName)
 
 	// managers
 	pm, err := ops.ProcessManager(ctx)
@@ -112,7 +112,7 @@ func main() {
 		log.Fatalf("FileManager: %v", err)
 	}
 
-	// создаём уникальные пути на госте
+	// creating the unique pathes for script and output
 	suffix := uniqueSuffix()
 	scriptPath := fmt.Sprintf("/tmp/govmomi_script_%s.sh", suffix)
 	outPath := fmt.Sprintf("/tmp/govmomi_out_%s.out", suffix)
@@ -156,7 +156,7 @@ func main() {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		log.Fatalf("upload script bad status: %s", resp.Status)
 	}
-	log.Printf("✅ Скрипт загружен в guest: %s (size=%d)", scriptPath, len(scriptContent))
+	log.Printf("✅ A sript is uploaded in guest: %s (size=%d)", scriptPath, len(scriptContent))
 
 	// run script with output redirection
 	progPath := "/bin/bash"
@@ -169,7 +169,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("StartProgram: %v", err)
 	}
-	log.Printf("▶ Запущен скрипт (pid=%d). Жду завершения...", pid)
+	log.Printf("▶ Script is running! (pid=%d). Waiting it's end...", pid)
 
 	// wait until finished
 	var procInfo *types.GuestProcessInfo
@@ -190,7 +190,7 @@ func main() {
 	if procInfo != nil {
 		log.Printf("✔ Скрипт завершился (exitCode=%d)", procInfo.ExitCode)
 	} else {
-		log.Printf("⚠ Не получили EndTime от процесса (pid=%d). Попробуем получить вывод всё равно.", pid)
+		log.Printf("EndTime didn't received (pid=%d). Ignoring this warning...", pid)
 	}
 
 	// download output
@@ -225,10 +225,10 @@ func main() {
 		log.Fatalf("cannot write output to file: %v", err)
 	}
 
-	log.Printf("✅ Вывод сохранён в файл: %s", outputFile)
+	log.Printf("✅ The output is saved to a file: %s", outputFile)
 
 	// cleanup
 	_ = fm.DeleteFile(ctx, auth, scriptPath)
 	_ = fm.DeleteFile(ctx, auth, outPath)
-	log.Printf("Удалены временные файлы на госте: %s , %s", scriptPath, outPath)
+	log.Printf("remove temporary files: %s , %s", scriptPath, outPath)
 }
