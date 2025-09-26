@@ -42,28 +42,23 @@ func httpClient(insecure bool) *http.Client {
 func main() {
 	_ = godotenv.Load()
 
+	// vCenter settings
 	vcHost := mustEnv("VCENTER_HOST")
 	vcUser := mustEnv("VCENTER_USER")
 	vcPass := mustEnv("VCENTER_PASS")
 	insecure := strings.ToLower(os.Getenv("VCENTER_INSECURE")) == "true"
 	dc := os.Getenv("VCENTER_DATACENTER")
-	vmName := mustEnv("VM_NAME")
 
+	// VM settings
+	vmName := mustEnv("VM_NAME")
 	guestUser := mustEnv("GUEST_USER")
 	guestPass := mustEnv("GUEST_PASS")
 
-	// команда: либо из env COMMAND, либо CLI args (совет: не используйте PowerShell "..." для сложных команд).
-	cmd := os.Getenv("COMMAND")
-	if len(os.Args) > 1 {
-		cmd = strings.Join(os.Args[1:], " ")
-	}
-	if cmd == "" {
-		log.Fatalf("no command provided: set COMMAND in .env or pass command as argument")
-	}
-
+	// ctx
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	// connect to vCenter
 	u := &url.URL{
 		Scheme: "https",
 		Host:   vcHost,
@@ -71,7 +66,6 @@ func main() {
 	}
 	u.User = url.UserPassword(vcUser, vcPass)
 
-	// connect
 	client, err := govmomi.NewClient(ctx, u, insecure)
 	if err != nil {
 		log.Fatalf("vCenter connect error: %v", err)
@@ -94,7 +88,7 @@ func main() {
 
 	ops := guest.NewOperationsManager(client.Client, vm.Reference())
 
-	// auth manager: проверяем учетку
+	// auth manager
 	authMgr, err := ops.AuthManager(ctx)
 	if err != nil {
 		log.Fatalf("AuthManager error: %v", err)
@@ -104,9 +98,9 @@ func main() {
 		Password: guestPass,
 	}
 	if err := authMgr.ValidateCredentials(ctx, auth); err != nil {
-		log.Fatalf("❌ Ошибка аутентификации: %v", err)
+		log.Fatalf("❌ authentication is failed: %v", err)
 	}
-	log.Printf("✅ Аутентификация успешна: %s@%s", guestUser, vmName)
+	log.Printf("✅ successful authentication: %s@%s", guestUser, vmName)
 
 	// managers
 	pm, err := ops.ProcessManager(ctx)
@@ -118,45 +112,40 @@ func main() {
 		log.Fatalf("FileManager: %v", err)
 	}
 
-	// создаём уникальные пути на госте
+	// creating the unique pathes for script and output
 	suffix := uniqueSuffix()
 	scriptPath := fmt.Sprintf("/tmp/govmomi_script_%s.sh", suffix)
 	outPath := fmt.Sprintf("/tmp/govmomi_out_%s.out", suffix)
 
-	// подготовим тело скрипта: добавим set -e? здесь не нужно; оставляем команду как есть.
-	// важно: пусть это будет полноценный bash-скрипт
-	//scriptContent := []byte("#!/bin/bash\nset -o pipefail\n\n" + cmd + "\n")
+	// читаем script.sh (обязательно должен существовать)
 	scriptContent, err := os.ReadFile("script.sh")
 	if err != nil {
-		log.Fatalf("Read script file: %v", err)
+		log.Fatalf("Read script.sh file: %v", err)
 	}
 
 	owner := int32(0)
 	group := int32(0)
 	fileAttr := &types.GuestPosixFileAttributes{
-		OwnerId:     &owner, // root
-		GroupId:     &group, // root
-		Permissions: 0777,   // или 0755 для скриптов
+		OwnerId:     &owner,
+		GroupId:     &group,
+		Permissions: 0777,
 	}
 
-	// upload script -> InitiateFileTransferToGuest
+	// upload script
 	putURL, err := fm.InitiateFileTransferToGuest(ctx, auth, scriptPath, fileAttr, int64(len(scriptContent)), true)
 	if err != nil {
 		log.Fatalf("InitiateFileTransferToGuest: %v", err)
 	}
-	// rewrite transfer URL if needed
 	uploadURL, err := fm.TransferURL(ctx, putURL)
 	if err != nil {
 		log.Fatalf("TransferURL (upload) error: %v", err)
 	}
 
-	// PUT content
 	httpc := httpClient(insecure)
 	req, err := http.NewRequestWithContext(ctx, "PUT", uploadURL.String(), bytes.NewReader(scriptContent))
 	if err != nil {
 		log.Fatalf("create PUT request: %v", err)
 	}
-	// Content-Type optional; some envs require it
 	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := httpc.Do(req)
 	if err != nil {
@@ -167,11 +156,10 @@ func main() {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		log.Fatalf("upload script bad status: %s", resp.Status)
 	}
-	log.Printf("✅ Скрипт загружен в guest: %s (size=%d)", scriptPath, len(scriptContent))
+	log.Printf("✅ A sript is uploaded in guest: %s (size=%d)", scriptPath, len(scriptContent))
 
-	// Запускаем скрипт, перенаправляя вывод в outPath и добавляя EXIT code
+	// run script with output redirection
 	progPath := "/bin/bash"
-	// команда: /bin/bash '/tmp/script' > '/tmp/out' 2>&1; echo EXIT:$? >> '/tmp/out'
 	progArgs := fmt.Sprintf(`-lc "sudo /bin/bash '%s' > '%s' 2>&1; echo EXIT:$? >> '%s'"`, scriptPath, outPath, outPath)
 
 	pid, err := pm.StartProgram(ctx, auth, &types.GuestProgramSpec{
@@ -181,9 +169,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("StartProgram: %v", err)
 	}
-	log.Printf("▶ Запущен скрипт (pid=%d). Жду завершения...", pid)
+	log.Printf("▶ Script is running! (pid=%d). Waiting it's end...", pid)
 
-	// ожидаем завершения процесса (с таймаутом)
+	// wait until finished
 	var procInfo *types.GuestProcessInfo
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
@@ -202,10 +190,10 @@ func main() {
 	if procInfo != nil {
 		log.Printf("✔ Скрипт завершился (exitCode=%d)", procInfo.ExitCode)
 	} else {
-		log.Printf("⚠ Не получили EndTime от процесса (pid=%d). Попробуем получить вывод всё равно.", pid)
+		log.Printf("EndTime didn't received (pid=%d). Ignoring this warning...", pid)
 	}
 
-	// скачиваем файл вывода
+	// download output
 	fti, err := fm.InitiateFileTransferFromGuest(ctx, auth, outPath)
 	if err != nil {
 		log.Fatalf("InitiateFileTransferFromGuest: %v", err)
@@ -225,7 +213,6 @@ func main() {
 		log.Fatalf("download output bad status=%s body=%s", resp2.Status, string(body))
 	}
 
-	// сохраняем вывод в файл "<VM_NAME>.txt"
 	outputFile := fmt.Sprintf("%s.txt", vmName)
 	outF, err := os.Create(outputFile)
 	if err != nil {
@@ -238,14 +225,10 @@ func main() {
 		log.Fatalf("cannot write output to file: %v", err)
 	}
 
-	log.Printf("✅ Вывод сохранён в файл: %s", outputFile)
+	log.Printf("✅ The output is saved to a file: %s", outputFile)
 
-	//	fmt.Println("----- OUTPUT START -----")
-	//	_, _ = io.Copy(os.Stdout, resp2.Body)
-	//	fmt.Println("\n----- OUTPUT END -----")
-
-	// cleanup: удаляем скрипт и файл вывода (игнорируем ошибки)
+	// cleanup
 	_ = fm.DeleteFile(ctx, auth, scriptPath)
 	_ = fm.DeleteFile(ctx, auth, outPath)
-	log.Printf("Удалены временные файлы на госте: %s , %s", scriptPath, outPath)
+	log.Printf("remove temporary files: %s , %s", scriptPath, outPath)
 }
